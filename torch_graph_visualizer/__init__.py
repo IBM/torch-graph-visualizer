@@ -280,8 +280,8 @@ class _GraphDrawer:
                         _NodeKind.PASSTHROUGH,
                         _NodeKind.GROUPCHECK
                     ):
-                        logger.warning("input node not processed:")
-                        logger.warning(f"    {inp.node()}")
+                        logger.debug("input node not processed:")
+                        logger.debug(f"    {inp.node()}")
 
         kind = _NodeKind.from_node(node)
 
