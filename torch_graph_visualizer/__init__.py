@@ -454,8 +454,8 @@ class _GraphDrawer:
                 if inp in self._values_to_pyvalues_map:
                     self._values_to_pyvalues_map[diff_inp] = self._values_to_pyvalues_map[inp]
                 else:
-                    logger.error(f"Input not in: {inp.debugName()} -> {diff_inp.debugName()}")
-                    logger.error(inp.node())
+                    logger.debug(f"Input not in: {inp.debugName()} -> {diff_inp.debugName()}")
+                    logger.debug(inp.node())
 
             node_attr = {"group": f"graph_{id(node)}"}
 
@@ -597,7 +597,7 @@ class _GraphDrawer:
 
                     self._values_to_pyvalues_map[out] = pyval
                 except Exception:
-                    print(f"Failed retrieving value: {node}")
+                    logger.debug(f"Failed retrieving value: {node}")
 
             if len(inputs) > 0:
                 # The 'nodeof' each output is the same as its corresponding
@@ -742,7 +742,6 @@ def draw_graph(
     else:
         args = None
 
-    print(args)
     drawer.draw(args=args)
     digraph.render()
 
