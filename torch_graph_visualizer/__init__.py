@@ -349,7 +349,7 @@ class _GraphDrawer:
 
                             output = getattr(torch.ops.aten, fnname)(*args, **kwargs)
                     except Exception:
-                        logger.error(f"Failed evaluating node: {node}", end="")
+                        logger.error(f"Failed evaluating node: {node}")
                         logger.error([self._value_to_label(inp) for inp in node.inputs()])
                         raise
 
