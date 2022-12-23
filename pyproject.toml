@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch_graph_visualizer"
+version = "0.0.1"
+dependencies = [
+    "torch",
+    "graphviz",
+]
+
+[tool.mypy]
+ignore_missing_imports = true
