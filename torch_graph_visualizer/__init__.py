@@ -6,7 +6,7 @@ import torch
 import torch.jit
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functorch.compile import (
     aot_module,
     ts_compile,
@@ -25,7 +25,8 @@ from typing import (
 
 import torch_graph_visualizer.attribute_generator as attr
 from torch_graph_visualizer.attribute_generator import AttributeGenerator
-from torch_graph_visualizer.profile import ProfiledKernel
+from torch_graph_visualizer.profile import ProfiledKernel, StatKind
+from torch_graph_visualizer.utils import get_milliseconds
 
 _GLOBAL_GRAPH_ATTR = {
     "newrank": "true"
@@ -301,15 +302,18 @@ class _GraphDrawer:
 
             if "aten::size" in node.kind():
                 assert len(outputs) == 1 and len(inputs) <= 2, f"bad node: {node}"
-                nodeof[outputs[0]] = nodeof[inputs[0]]
+                if inputs[0] in nodeof:
+                    nodeof[outputs[0]] = nodeof[inputs[0]]
 
             elif "aten::__getitem__" in node.kind():
                 assert len(outputs) == 1 and len(inputs) == 2, f"bad node: {node}"
-                nodeof[outputs[0]] = nodeof[inputs[0]]
+                if inputs[0] in nodeof:
+                    nodeof[outputs[0]] = nodeof[inputs[0]]
 
             elif "aten::_set_item" in node.kind():
                 assert len(outputs) == 1 and len(inputs) == 3, f"bad node: {node}"
-                nodeof[outputs[0]] = nodeof[inputs[0]]
+                if inputs[0] in nodeof:
+                    nodeof[outputs[0]] = nodeof[inputs[0]]
 
             elif _should_ignore_node(node):
                 logger.debug("node of scalar inputs ignored:")
@@ -380,7 +384,7 @@ class _GraphDrawer:
                 ):
                     kernel = get_next_kernel(fnname)
 
-                    while "matmul" in fnname and "elementwise" in kernel.name:
+                    while "matmul" in fnname and "elementwise" in kernel.name():
                         kernel = get_next_kernel(fnname)
 
                     if self._attr_gen is not None:
@@ -506,7 +510,8 @@ class _GraphDrawer:
             subgraph_outputs = list(subgraph.outputs())
 
             for out, diff_out in zip(node_outputs, subgraph_outputs):
-                self._values_to_pyvalues_map[out] = self._values_to_pyvalues_map[diff_out]
+                if diff_out in self._values_to_pyvalues_map:
+                    self._values_to_pyvalues_map[out] = self._values_to_pyvalues_map[diff_out]
                 nodeof[out] = nodeof[diff_out]
 
             for i in range(len(node_outputs), len(subgraph_outputs)):
@@ -607,14 +612,18 @@ class _GraphDrawer:
             return str(list(value.shape))
         if isinstance(value, (int, str, bool, float, complex)):
             return str(value)
-        return ""
+        return f"{type(value).__name__}"
 
     def _draw_inputs(self, nodeof, args):
         for i, inp in enumerate(self._inputs()):
-            self._values_to_pyvalues_map[inp] = args[i]
+            if args is not None:
+                self._values_to_pyvalues_map[inp] = args[i]
+                label = f"{{ %{inp.debugName()} | {self._value_to_label(inp)} }}"
+                shape = "record"
+            else:
+                label = f"%{inp.debugName()}"
+                shape = "ellipse"
             nodeof[inp] = _DigraphNode.from_value(inp)
-            label = f"{{ %{inp.debugName()} | {self._value_to_label(inp)} }}"
-            shape = "record"
             self._node(nodeof[inp], label=label, shape=shape)
 
     def _draw_graph(self, nodeof):
@@ -707,7 +716,7 @@ def draw_graph(
         output_name: str = "graph",
         profiled_kernels: Sequence[ProfiledKernel] = [],
         attribute_generator: Optional[AttributeGenerator] = None,
-        input_data: Tuple = (),
+        input_data: Optional[Tuple] = None,
         is_nn_module: bool = True,
 ) -> None:
     op_to_profiled_kernel = defaultdict(list)
@@ -726,10 +735,14 @@ def draw_graph(
         attr_gen=attribute_generator
     )
 
-    args = list(input_data)
-    if is_nn_module:
-        args = [None] + args
+    if is_nn_module and input_data is not None:
+        args = [None] + list(input_data)
+    elif input_data is not None:
+        args = list(input_data)
+    else:
+        args = None
 
+    print(args)
     drawer.draw(args=args)
     digraph.render()
 
@@ -742,7 +755,8 @@ def draw_graph(
 
 @dataclass
 class _AOTHelper:
-    graphs: List[torch.Graph] = []
+    graphs: List[torch.Graph] = field(default_factory=list)
+    call_args_list: List[Tuple] = field(default_factory=list)
     capture: bool = False
 
     def get_compiler_fn(self) -> Callable:
@@ -754,9 +768,10 @@ class _AOTHelper:
                     self.helper = helper
 
                 def __call__(self, *call_args):
-                    r = self.f(*call_args)
+                    r = self.f(call_args)
                     if self.helper.capture:
-                        self.helper.graphs.append(self.f.graph_for(*call_args))
+                        self.helper.graphs.append(torch.jit.last_executed_optimized_graph())
+                        self.helper.call_args_list.append(call_args)
                     return r
 
             f = ts_compile(gm, inputs)
@@ -767,12 +782,11 @@ class _AOTHelper:
 
 def draw_model(
         model: torch.nn.Module,
-        output_name_template: str = "{attr}-{mode}{index}-{jit}-{fuser}",
-        profiled_kernels: Sequence[ProfiledKernel] = [],
-        attribute_generator: AttributeGenerator = attr.Nop(),
         input_data: Tuple = (),
+        output_name_template: str = "{attr}-{mode}{index}-{jit}-{fuser}",
+        profiled_kernels_groups: List[Sequence[ProfiledKernel]] = [],
+        attribute_generator: AttributeGenerator = attr.Nop(),
         allow_backward: bool = True,
-        is_nn_module: bool = True,
         fuser: str = "none",
         jit: str = "none"
 ) -> None:
@@ -793,10 +807,9 @@ def draw_model(
                 if allow_backward:
                     r.mean().backward()
 
-    assert (
-        jit == "none" and fuser == "none"
-        or jit != "none"
-    ), f"if 'jit' ({jit}) is 'none', 'fuser' ({fuser}) must also be 'none'."
+    if jit == "none" and fuser != "none":
+        logger.warning(f"ignoring fuser ({fuser}) value, since 'jit' is 'none.")
+        fuser = "none"
 
     aot_helper = _AOTHelper()
     with torch.jit.fuser(fuser):
@@ -822,13 +835,13 @@ def draw_model(
             with torch.jit.optimized_execution(True):
                 run(ts_model, ninputs=1)
 
-        for i, g in enumerate(aot_helper.graphs):
+        for i, (g, args) in enumerate(zip(aot_helper.graphs, aot_helper.call_args_list)):
             draw_graph(
                 graph=g,
                 output_name=output_name_template.format(mode="g", index=i, **base_kwargs),
-                profiled_kernels=profiled_kernels,
+                profiled_kernels=profiled_kernels_groups[i],
                 attribute_generator=attribute_generator,
-                input_data=input_data,
+                input_data=args,
                 is_nn_module=True,
             )
         return
@@ -836,7 +849,7 @@ def draw_model(
     draw_graph(
         graph=_graph_for(ts_model.get_debug_state()),
         output_name=output_name_template.format(mode="forward", index=0, **base_kwargs),
-        profiled_kernels=profiled_kernels,
+        profiled_kernels=profiled_kernels_groups[0],
         attribute_generator=attribute_generator,
         input_data=input_data,
         is_nn_module=True,
@@ -846,11 +859,11 @@ def draw_model(
         fw_execution_plan = list(ts_model.get_debug_state().execution_plans.values())[0]
         for i, bw_state in enumerate(fw_execution_plan.code.grad_executor_states()):
             output_name = output_name_template.format(mode="backward", index=i, **base_kwargs)
+            group_index = min(len(profiled_kernels_groups) - 1, i + 1)
             draw_graph(
                 graph=_graph_for(bw_state),
                 output_name=output_name,
-                profiled_kernels=profiled_kernels,
+                profiled_kernels=profiled_kernels_groups[group_index],
                 attribute_generator=attribute_generator,
-                input_data=input_data,
                 is_nn_module=True,
             )

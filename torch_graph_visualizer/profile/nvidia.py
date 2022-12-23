@@ -23,12 +23,12 @@ _RE_PROCESS = re.compile(
 )
 
 _RE_KERNEL = re.compile(
-    r"^  (?P<name>\S.*), (?P<date>\d{4}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2}), "
+    r"^  (?P<_name>\S.*), (?P<_date>\d{4}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2}), "
     r"Context (?P<context>\d*), Stream (?P<stream>\d*)"
 )
 
 _RE_CALLSTACK_ENTRY = re.compile(
-    r"      #(?P<depth>\d*) (?P<address>0x[0-9a-f]*) (?P<mode>in|of) (?P<name>.*)"
+    r"      #(?P<depth>\d*) (?P<address>0x[0-9a-f]*) (?P<mode>in|of) (?P<_name>.*)"
 )
 
 _RE_NVTX = re.compile(
@@ -102,7 +102,7 @@ class NVIDIAProfiledKernel(_BaseNewWithExtraKwargs, prof.ProfiledKernel):
     @classmethod
     def new(cls, **kwargs):
         kw = {f.name: kwargs[f.name] for f in fields(cls) if f.name in kwargs}
-        kw["date"] = datetime.datetime.strptime(kw["date"], "%Y-%b-%d %H:%M:%S")
+        kw["_date"] = datetime.datetime.strptime(kw["_date"], "%Y-%b-%d %H:%M:%S")
         return cls(**kw)
 
     def name(self) -> str:
@@ -240,7 +240,7 @@ class _Parser:
 
         # Hack for better printing shared library addresses.
         if groupdict["mode"] == "of":
-            groupdict["name"] = groupdict["address"] + " of " + groupdict["name"]
+            groupdict["_name"] = groupdict["address"] + " of " + groupdict["_name"]
 
         self._current_kernel_data[NVIDIAProfiledKernel.CALLSTACK].append(
             NVIDIACallStackEntry.new(**groupdict)
