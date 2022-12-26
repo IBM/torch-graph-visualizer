@@ -81,7 +81,7 @@ def run_model(
 
     with torch.jit.fuser(fuser), torch.jit.optimized_execution(True):
         with nvtx_sync("warm-up"):
-            for i in range(max(len(input_data()), warmup_steps)):
+            for i in range(max(len(input_data), warmup_steps)):
                 pred = ts_model(*input_data[i % len(input_data)])
                 loss = pred.mean()
                 loss.backward()

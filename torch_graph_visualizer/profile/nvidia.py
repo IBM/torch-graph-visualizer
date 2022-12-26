@@ -1,4 +1,5 @@
 import datetime
+import logging
 import re
 
 from abc import ABC, abstractclassmethod
@@ -18,13 +19,19 @@ from typing import (
 
 import torch_graph_visualizer.profile as prof
 
+logger = logging.getLogger(__name__)
+
 _RE_PROCESS = re.compile(
     r"^\[(?P<pid>\d*)\] (?P<name>[^@]*)@(?P<hostip>[0-9\.]*)"
 )
 
 _RE_KERNEL = re.compile(
-    r"^  (?P<_name>\S.*), (?P<_date>\d{4}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2}), "
-    r"Context (?P<context>\d*), Stream (?P<stream>\d*)"
+    r"^  (?P<_name>\S.*)"
+    r"(, (?P<_date>\d{4}-[A-Za-z]{3}-\d{2} \d{2}:\d{2}:\d{2})|)"
+    r"(, Context (?P<context>\d*)|)"
+    r"(, Stream (?P<stream>\d*)|)"
+    r"(, Device (?P<device>\d*)|)"
+    r"(, CC (?P<cc>\d*\.\d*)|)"
 )
 
 _RE_CALLSTACK_ENTRY = re.compile(
@@ -94,7 +101,7 @@ class NVIDIAProfiledKernel(_BaseNewWithExtraKwargs, prof.ProfiledKernel):
     STATS: ClassVar[str] = "_stats"
 
     _name: str
-    _date: datetime.datetime
+    _date: Optional[datetime.datetime]
     _callstack: List[NVIDIACallStackEntry]
     _nvtx: List[str]
     _stats: Dict[str, Any]
@@ -102,7 +109,8 @@ class NVIDIAProfiledKernel(_BaseNewWithExtraKwargs, prof.ProfiledKernel):
     @classmethod
     def new(cls, **kwargs):
         kw = {f.name: kwargs[f.name] for f in fields(cls) if f.name in kwargs}
-        kw["_date"] = datetime.datetime.strptime(kw["_date"], "%Y-%b-%d %H:%M:%S")
+        kw["_date"] = datetime.datetime.strptime(kw["_date"], "%Y-%b-%d %H:%M:%S") \
+            if kw["_date"] is not None else None
         return cls(**kw)
 
     def name(self) -> str:
@@ -112,6 +120,7 @@ class NVIDIAProfiledKernel(_BaseNewWithExtraKwargs, prof.ProfiledKernel):
         return self._callstack
 
     def get(self, stat: prof.Stat) -> Any:
+        print(self._stats)
         if stat == prof.StatKind.ComputeThroughput:
             return self._stats["GPUSpeedOfLightThroughput"]["Compute"]
         elif stat == prof.StatKind.MemoryThroughput:
@@ -202,6 +211,13 @@ class PredicatedPrinter(PrettyPrinter):
         return ""
 
 
+class SectionState(Enum):
+    Title = auto()
+    Header = auto()
+    Body = auto()
+    Outside = auto()
+
+
 @dataclass
 class _Parser:
     processes: List[NVIDIAProfiledProcess] = field(default_factory=list)
@@ -210,6 +226,7 @@ class _Parser:
     _current_kernel_data: Optional[Dict[str, Any]] = None
     _current_process_data: Optional[Dict[str, Any]] = None
     _current_section_data: Optional[Tuple[str, bool]] = None
+    _current_section_state: SectionState = SectionState.Outside
 
     def _append_process(self) -> None:
         if self._current_process_data is not None:
@@ -255,6 +272,7 @@ class _Parser:
     def handle_stats_section(self, groupdict: Dict[str, str]) -> None:
         name = groupdict["name"].replace(" ", "")
         self._current_section_data = (name, False)
+        self._current_section_state = SectionState.Title
 
     def handle_stats_separator(self, groupdict: Dict[str, str]) -> None:
         assert self._current_kernel_data is not None
@@ -262,17 +280,34 @@ class _Parser:
         if self._current_section_data is None:
             return
 
-        name, active = self._current_section_data
+        if self._current_section_state == SectionState.Title:
+            self._current_section_state = SectionState.Header
+            name, active = self._current_section_data
 
-        if active:
-            self._current_section_data = None
+            if active:
+                self._current_section_data = None
+            else:
+                stats = self._current_kernel_data.setdefault(NVIDIAProfiledKernel.STATS, dict())
+                stats[name] = dict()
+                self._current_section_data = (name, True)
+
+        elif self._current_section_state == SectionState.Header:
+            self._current_section_state = SectionState.Body
+        elif self._current_section_state == SectionState.Body:
+            self._current_section_state = SectionState.Outside
         else:
-            stats = self._current_kernel_data.setdefault(NVIDIAProfiledKernel.STATS, dict())
-            stats[name] = dict()
-            self._current_section_data = (name, True)
+            raise RuntimeError("unexpected section separator")
 
     def handle_stats_row(self, groupdict: Dict[str, str]) -> None:
         assert self._current_kernel_data is not None
+
+        if self._current_section_state not in (SectionState.Header, SectionState.Body):
+            logger.warning(
+                "ignoring row due to unexpected section state: "
+                f"{self._current_section_state}"
+            )
+            logger.warning(f"    {groupdict}")
+            return
 
         if self._current_section_data is None:
             return
@@ -326,7 +361,12 @@ def parse_ncu_file(prof: str) -> List[NVIDIAProfiledProcess]:
             for kind, regex in kind_and_regex:
                 m = regex.match(line)
                 if m:
+                    # print(f"Matched {kind} for line: {line}")
                     dispatch[kind](m.groupdict())
+                    break
+                else:
+                    # print(f"Failed matching {kind} for line: {line}")
+                    ...
 
     parser.finalize()
     return parser.processes

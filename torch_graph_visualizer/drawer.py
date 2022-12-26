@@ -12,6 +12,7 @@ from functorch.compile import (
     ts_compile,
     make_boxed_compiler
 )
+from itertools import chain
 from typing import (
     Any,
     Callable,
@@ -24,12 +25,8 @@ from typing import (
 )
 
 import torch_graph_visualizer.attribute_generator as attr
-from torch_graph_visualizer import (
-    AttributeGenerator,
-    ProfiledKernel,
-    StatKind,
-    get_milliseconds
-)
+from torch_graph_visualizer.profile import ProfiledKernel
+from torch_graph_visualizer.utils import get_milliseconds
 
 _GLOBAL_GRAPH_ATTR = {
     "newrank": "true"
@@ -183,7 +180,7 @@ class _GraphDrawer:
             color_fused: str = "mistyrose2",
             kernels: Optional[Dict[str, List[ProfiledKernel]]] = None,
             kernels_count: Optional[Dict[str, int]] = None,
-            attr_gen: Optional[AttributeGenerator] = None,
+            attr_gen: Optional[attr.AttributeGenerator] = None,
             values_to_pyvalues_map: Optional[Dict[torch.Value, Any]] = None
     ) -> None:
         self._graph = graph
@@ -718,7 +715,7 @@ def draw_graph(
         graph: torch.Graph,
         output_name: str = "graph",
         profiled_kernels: Sequence[ProfiledKernel] = [],
-        attribute_generator: Optional[AttributeGenerator] = None,
+        attribute_generator: Optional[attr.AttributeGenerator] = None,
         input_data: Optional[Tuple] = None,
         is_nn_module: bool = True,
 ) -> None:
@@ -787,7 +784,7 @@ def draw_model(
         input_data: Tuple = (),
         output_name_template: str = "{attr}-{mode}{index}-{jit}-{fuser}",
         profiled_kernels_groups: List[Sequence[ProfiledKernel]] = [],
-        attribute_generator: AttributeGenerator = attr.Nop(),
+        attribute_generator: attr.AttributeGenerator = attr.Nop(),
         allow_backward: bool = True,
         fuser: str = "none",
         jit: str = "none",
@@ -826,7 +823,7 @@ def draw_model(
         else:
             raise ValueError(f"unexpected value for 'jit': {jit}")
 
-        with torch.jit.optimized_execution(True):
+        with torch.jit.optimized_execution(jit != "none"):
             run(ts_model, repeat=warmup_steps)
 
     if jit == "aot":
@@ -875,7 +872,7 @@ def default_draw_model(
         input_data: Tuple = (),
         output_name_template: str = "{attr}-{mode}{index}-{jit}-{fuser}",
         profiled_kernels: Sequence[ProfiledKernel] = [],
-        attribute_generator_factory: Callable[[int], AttributeGenerator] = lambda x: attr.Nop(),
+        attribute_generator_fn: Callable[[int], attr.AttributeGenerator] = lambda x: attr.Nop(),
         allow_backward: bool = True,
         fuser: str = "none",
         jit: str = "none",
@@ -893,15 +890,16 @@ def default_draw_model(
     if jit == "aot":
         groups = []
         last_group = None
-        for k in zip(fw_profiled_kernels, bw_profiled_kernels):
-            group = next(filter(lambda s: s.startswith("aot-graph")), None)
+        for k in chain(fw_profiled_kernels, bw_profiled_kernels):
+            group = next(filter(lambda s: s.startswith("aot-graph"), k._nvtx), None)
             if last_group != group:
                 groups.append(group)
+                last_group = group
 
         profiled_kernels_groups = [
             [k for k in profiled_kernels if grp in k._nvtx]
             for grp in groups
-            for k in zip(fw_profiled_kernels, bw_profiled_kernels)
+            for k in chain(fw_profiled_kernels, bw_profiled_kernels)
         ]
     else:
         if len(fw_profiled_kernels) > 0:
@@ -912,7 +910,7 @@ def default_draw_model(
     max_duration_ms = 0
     for group in profiled_kernels_groups:
         for k in group:
-            duration_str, units = k.get(StatKind.Duration)
+            duration_str, units = k.get(attr.StatKind.Duration)
             max_duration_ms = max(max_duration_ms, get_milliseconds(float(duration_str), units))
 
     draw_model(
@@ -920,7 +918,7 @@ def default_draw_model(
         input_data=input_data,
         output_name_template=output_name_template,
         profiled_kernels_groups=profiled_kernels_groups,
-        attribute_generator=attribute_generator_factory(max_duration_ms),
+        attribute_generator=attribute_generator_fn(max_duration_ms),
         allow_backward=allow_backward,
         fuser=fuser,
         jit=jit,
